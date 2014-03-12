@@ -50,7 +50,9 @@ function loadUsers(req, res, next) {
                 attributes: {},
             }
             for(var attr in config.ldap.users.sqlmapping) {
-                req.users[userkey].attributes[attr] = rows[row][config.ldap.users.sqlmapping[attr]];
+                if(rows[row][config.ldap.users.sqlmapping[attr]] !== undefined) {
+                    req.users[userkey].attributes[attr] = rows[row][config.ldap.users.sqlmapping[attr]];
+                }
             }
             for(var attr in config.ldap.users.staticmapping) {
                 req.users[userkey].attributes[attr] = config.ldap.users.staticmapping[attr];
@@ -74,7 +76,9 @@ function loadGroups(req, res, next) {
                     attributes: {},
                 }
                 for(var attr in config.ldap.groups.sqlmapping) {
-                    req.groups[rdn].attributes[attr] = rows[row][config.ldap.groups.sqlmapping[attr]];
+                    if(rows[row][config.ldap.groups.sqlmapping[attr]] !== undefined) {
+                        req.groups[rdn].attributes[attr] = rows[row][config.ldap.groups.sqlmapping[attr]];
+                    }
                 }
                 for(var attr in config.ldap.groups.staticmapping) {
                     req.groups[rdn].attributes[attr] = config.ldap.groups.staticmapping[attr];
@@ -105,7 +109,6 @@ server.listen(1389, function() {
 
 
 server.bind('ou='+config.ldap.users.ou +',' + config.ldap.basedn, preUsers, function(req,res,next) {
-    console.log("Bind request for " + req.dn.toString());
     var dn = req.dn.toString();
     var userObj = req.users[dn];
     if(userObj === undefined) {
@@ -143,7 +146,6 @@ server.bind('ou='+config.ldap.users.ou +',' + config.ldap.basedn, preUsers, func
 
 // Group Search
 server.search('ou='+config.ldap.groups.ou +','+config.ldap.basedn, preGroups, function(req,res,next) {
-    console.log("Group search");
     console.log("basedn= " + req.dn.toString() + ", filter=" + req.filter.toString());
     if(req.scope == 'sub') {
         var ou = { dn: 'ou='+config.ldap.groups.ou + ',' + config.ldap.basedn,
@@ -166,7 +168,6 @@ server.search('ou='+config.ldap.groups.ou +','+config.ldap.basedn, preGroups, fu
 
 // User Search
 server.search('ou='+config.ldap.users.ou +','+config.ldap.basedn, preUsers, function(req,res,next) {
-    console.log("User search");
     console.log("basedn= " + req.dn.toString() + ", filter=" + req.filter.toString());
     if(req.scope == 'sub') {
         var ou = { dn: 'ou='+config.ldap.users.ou + ',' + config.ldap.basedn,
@@ -189,7 +190,6 @@ server.search('ou='+config.ldap.users.ou +','+config.ldap.basedn, preUsers, func
 
 // Root Search
 server.search(config.ldap.basedn, preUsers, preGroups, function(req,res,next) {
-    console.log("Root search");
     console.log("basedn= " + req.dn.toString() + ", filter=" + req.filter.toString() + ", scope=" + req.scope);
 
     if(req.scope == 'sub') {
@@ -197,11 +197,7 @@ server.search(config.ldap.basedn, preUsers, preGroups, function(req,res,next) {
                        attributes: { dc:config.ldap.basedc, objectclass: ['dcObject','organization'], hasSubordinates: ['TRUE']},
         };
         if(req.filter.matches(rootdn.attributes)) {
-            console.log("rootdn matches, sending");
             res.send(rootdn);
-        }
-        else {
-            console.log("rootdn does not match");
         }
     }
 
@@ -210,12 +206,10 @@ server.search(config.ldap.basedn, preUsers, preGroups, function(req,res,next) {
               attributes: { ou: config.ldap.users.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE'] },
              };
     if(req.filter.matches(user_ou.attributes)) {
-        console.log("user_ou matches, sending");
         res.send(user_ou);
     }
     Object.keys(req.users).forEach(function(k) {
         if(req.filter.matches(req.users[k].attributes)) {
-            console.log("ind user matches, sending");
             res.send(req.users[k]);
         }
     });
@@ -225,12 +219,10 @@ server.search(config.ldap.basedn, preUsers, preGroups, function(req,res,next) {
                attributes: { ou: config.ldap.groups.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE'] },
              };
     if(req.filter.matches(group_ou.attributes)) {
-        console.log("group_ou matches, sending");
         res.send(group_ou);
     }
     Object.keys(req.groups).forEach(function(k) {
         if(req.filter.matches(req.groups[k].attributes)) {
-            console.log("ind group matches, sending");
             res.send(req.groups[k]);
         }
     });
