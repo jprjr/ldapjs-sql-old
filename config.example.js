@@ -12,12 +12,16 @@ config.sql.user       = 'someusername';
 config.sql.password   = 'somepassword';
 config.sql.database   = 'mydatabaseofstuff';
 
+
+// config.ldap.timeout sets how often to refresh
+// the users and groups from the sql database
+// This value is in milliseconds
+config.ldap.timeout = 1000 * 60 * 5; // 5 minutes
 // basedn will be appended to all other objects
 // ie - a users full rdn will wind up being
 //   config.ldap.users.rdn +
 //   config.ldap.users.ou +
 //   config.ldap.basedn
-
 config.ldap.basedn = 'dc=example,dc=com';
 
 config.ldap.users = {};
