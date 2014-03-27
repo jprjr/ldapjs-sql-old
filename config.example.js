@@ -24,6 +24,9 @@ config.ldap.timeout = 1000 * 60 * 5; // 5 minutes
 //   config.ldap.basedn
 config.ldap.basedn = 'dc=example,dc=com';
 
+// basedc is really only used against a root search
+config.ldap.basedc = 'example';
+
 config.ldap.users = {};
 config.ldap.users.ou    = 'ou=users';
 
