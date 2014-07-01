@@ -13,32 +13,74 @@ if(! ("config" in argv)) {
 var config = require(argv.config);
 var users = {};
 var groups = {};
-
 var sql_connection;
 
-function loadUsers() {
+// end global variables
+
+// User constructor
+function User(dn,attributes) { // {{{1
+    this.dn = dn;
+    this.attributes = attributes;
+    this.userpassword = false;
+    var _userpassword;
+    if(this.attributes.userpassword !== undefined) { // {{{2
+        this.userpassword = true;
+        _userpassword = this.attributes.userpassword;
+        delete this.attributes.userpassword;
+        this.checkPassword = function(password) {
+            var matches;
+            matches = _userpassword.match(/^(\{.+\})/);
+            if(matches === null) {
+                // password stored in plaintext
+                if(password !== _userpassword) {
+                    return false;
+                }
+                return true;
+            }
+            else {
+                var hashmethod = matches[1].replace('{','').replace('}','').toLowerCase();
+                var passdata = _userpassword.replace(matches[1],'');
+                if(hashmethod === 'sha') {
+                    hashmethod = 'sha1'; // node seems to produce different results between sha and sha1
+                }
+                var hash = crypto.createHash(hashmethod).update(password).digest('base64');
+                if(hash !== passdata) {
+                    return false;
+                }
+                return true;
+            }
+            // Getting here shouldn't happen, this is a just-in-case
+            return false;
+        }
+
+    } // }}}
+    return this;
+} // }}}
+
+function loadUsers() { /// {{{1
     sql_connection.query(config.ldap.users.query, function(err, rows) {
         users = {};
         for(var row in rows) {
-            var rdn = rows[row][config.ldap.users.sqlmapping[config.ldap.users.rdn]] + ',' + 'ou='+config.ldap.users.ou + ',' + config.ldap.basedn;
+            var rdn =
+              rows[row][config.ldap.users.sqlmapping[config.ldap.users.rdn]] + ','
+              + 'ou='+config.ldap.users.ou + ','
+              + config.ldap.basedn;
             var userkey = config.ldap.users.rdn + '=' + rdn;
-            users[userkey] = {
-                dn: userkey,
-                attributes: {},
-            }
+            var attributes = {};
             for(var attr in config.ldap.users.sqlmapping) {
                 if(rows[row][config.ldap.users.sqlmapping[attr]] !== undefined) {
-                    users[userkey].attributes[attr] = rows[row][config.ldap.users.sqlmapping[attr]];
+                    attributes[attr.toLowerCase()] = rows[row][config.ldap.users.sqlmapping[attr]];
                 }
             }
             for(var attr in config.ldap.users.staticmapping) {
-                users[userkey].attributes[attr] = config.ldap.users.staticmapping[attr];
+                attributes[attr.toLowerCase()] = config.ldap.users.staticmapping[attr];
             }
+            users[userkey] = new User(userkey,attributes);
         }
     });
-}
+} // }}}
 
-function loadGroups() {
+function loadGroups() { // {{{1
     sql_connection.query(config.ldap.groups.query, function(err, rows) {
         groups = {};
         for(var row in rows) {
@@ -50,26 +92,38 @@ function loadGroups() {
                 }
                 for(var attr in config.ldap.groups.sqlmapping) {
                     if(rows[row][config.ldap.groups.sqlmapping[attr]] !== undefined) {
-                        groups[rdn].attributes[attr] = rows[row][config.ldap.groups.sqlmapping[attr]];
+                        groups[rdn].attributes[attr.toLowerCase()] = rows[row][config.ldap.groups.sqlmapping[attr]];
                     }
                 }
                 for(var attr in config.ldap.groups.staticmapping) {
-                    groups[rdn].attributes[attr] = config.ldap.groups.staticmapping[attr];
+                    groups[rdn].attributes[attr.toLowerCase()] = config.ldap.groups.staticmapping[attr];
                 }
             }
             for(var attr in config.ldap.groups.membermapping) {
-                if(groups[rdn].attributes[attr] === undefined) {
-                    groups[rdn].attributes[attr] = new Array();
+                if(groups[rdn].attributes[attr.toLowerCase()] === undefined) {
+                    groups[rdn].attributes[attr.toLowerCase()] = new Array();
                 }
-                groups[rdn].attributes[attr].push(
-                  config.ldap.users.rdn + '=' + rows[row][config.ldap.groups.membermapping[attr]] + ',ou='+config.ldap.users.ou + ',' + config.ldap.basedn
-                );
+
+                var userdn = config.ldap.users.rdn
+                             + '='
+                             + rows[row][config.ldap.groups.membermapping[attr]]
+                             + ',ou='+config.ldap.users.ou
+                             + ','
+                             + config.ldap.basedn;
+                if(users[userdn] !== undefined) {
+                    // user exists
+                    groups[rdn].attributes[attr].push(userdn);
+                    if(users[userdn].attributes['memberof'] === undefined) {
+                        users[userdn].attributes['memberof'] = new Array();
+                    }
+                    users[userdn].attributes['memberof'].push(config.ldap.groups.rdn + '=' + rdn);
+                }
             }
         }
     });
-}
+} // }}}
 
-function handleDisconnect() {
+function handleDisconnect() { // {{{1
     sql_connection = Sql.createConnection( config.sql );
 
     sql_connection.connect(function(err) {
@@ -95,101 +149,132 @@ function handleDisconnect() {
             throw err;
         }
     });
-}
+} // }}}
 
 handleDisconnect();
 
-var server = Ldap.createServer();
-server.listen(1389, function() {
+function endRequest(req,res,next) { // {{{1
+    res.end();
+    return next();
+} // }}}
+
+function userSearch(req,res,next) { // {{{1
+    var dn = req.connection.ldap.bindDN.toString();
+    var userObj = users[dn];
+    if(userObj === undefined) {
+        return next(new Ldap.InsufficientAccessRightsError());
+    }
+    var ou_dn = 'ou=' + config.ldap.users.ou + ','
+                + config.ldap.basedn;
+    var ou = { dn: ou_dn,
+               attributes: { ou: config.ldap.users.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE'] },
+    };
+
+    if( req.scope === 'sub' ||
+          (req.scope === 'one' && req.dn.toString() === config.ldap.basedn) ||
+          (req.scope === 'base' && req.dn.toString() === ou_dn ) ) {
+        if(req.filter.matches(ou.attributes)) {
+            res.send(ou);
+        }
+    }
+
+    if( req.scope === 'sub' ||
+          (req.scope === 'one' && req.dn.toString() === ou_dn)) {
+        Object.keys(users).forEach(function(k) {
+            if(req.filter.matches(users[k].attributes)) {
+                res.send(users[k]);
+            }
+        });
+    }
+} // }}}
+
+function groupSearch(req,res,next) { // {{{1
+    var dn = req.connection.ldap.bindDN.toString();
+    var userObj = users[dn];
+    if(userObj === undefined) {
+        return next(new Ldap.InsufficientAccessRightsError());
+    }
+    var ou_dn = 'ou='+config.ldap.groups.ou + ','
+                + config.ldap.basedn;
+
+    var ou = { dn: ou_dn,
+               attributes: { ou: config.ldap.groups.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE']},
+    };
+
+    if( req.scope === 'sub' ||
+          (req.scope === 'one' && req.dn.toString() === config.ldap.basedn) ||
+          (req.scope === 'base' && req.dn.toString() === ou_dn ) ) {
+        if(req.filter.matches(ou.attributes)) {
+            res.send(ou);
+        }
+    }
+
+    if( req.scope === 'sub' ||
+          (req.scope === 'one' && req.dn.toString() === ou_dn)) {
+        Object.keys(groups).forEach(function(k) {
+            if(req.filter.matches(groups[k].attributes)) {
+                res.send(groups[k]);
+            }
+        });
+    }
+} //}}}
+
+var server_config = {};
+if(config.ldap.ssl_cert !== undefined) {
+    server_config.certificate = config.ldap.ssl_cert;
+}
+if(config.ldap.ssl_key !== undefined) {
+    server_config.key = config.ldap.ssl_key;
+}
+
+var server = Ldap.createServer(server_config);
+server.listen(config.ldap.port, function() {
     console.log('LDAP server listening at %s', server.url);
 });
 
 
-server.bind('ou='+config.ldap.users.ou +',' + config.ldap.basedn, function(req,res,next) {
+// bind
+server.bind('ou='+config.ldap.users.ou +',' + config.ldap.basedn, function(req,res,next) { // {{{1
     var dn = req.dn.toString();
     var userObj = users[dn];
     if(userObj === undefined) {
-        return next(new Ldap.NoSuchObjectError(dn));
+        return next(new Ldap.InsufficientAccessRightsError());
     }
 
-    if(userObj.attributes.userpassword === undefined) {
+    if(! userObj.userpassword) {
         return next(new Ldap.NoSuchAttributeError('userpassword'));
     }
 
-    var matches;
-    matches = userObj.attributes.userpassword.match(/^(\{.+\})/);
-    if(matches === null) {
-        // password stored in plaintext
-        if(req.credentials.toString() !== userObj.attributes.userpassword) {
-            return next(new Ldap.InvalidCredentialsError());
-        }
-    }
-    else {
-        var hashmethod = matches[1].replace('{','').replace('}','').toLowerCase();
-        var passdata = userObj.attributes.userpassword.replace(matches[1],'');
-        if(hashmethod === 'sha') {
-            hashmethod = 'sha1'; // node seems to produce different results between sha and sha1
-        }
-        var hash = crypto.createHash(hashmethod).update(req.credentials.toString()).digest('base64');
-        if(hash !== passdata) {
-            return next(new Ldap.InvalidCredentialsError());
-        }
+    if(! userObj.checkPassword(req.credentials.toString()) ) {
+        return next(new Ldap.InvalidCredentialsError());
     }
 
     res.end();
     return next();
-});
+}); // }}}
 
 
 // Group Search
-server.search('ou='+config.ldap.groups.ou +','+config.ldap.basedn, function(req,res,next) {
-    console.log("basedn= " + req.dn.toString() + ", filter=" + req.filter.toString());
-    if(req.scope == 'sub') {
-        var ou = { dn: 'ou='+config.ldap.groups.ou + ',' + config.ldap.basedn,
-                   attributes: { ou: config.ldap.groups.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE'] },
-                 };
-        if(req.filter.matches(ou.attributes)) {
-            res.send(ou);
-        }
-    }
-
-    Object.keys(groups).forEach(function(k) {
-        if(req.filter.matches(groups[k].attributes)) {
-            res.send(groups[k]);
-        }
-    });
-
-    res.end();
-    return next();
-});
+server.search('ou='+config.ldap.groups.ou +','+config.ldap.basedn, function(req,res,next) { // {{{1
+    groupSearch(req,res,next);
+    endRequest(req,res,next);
+}); // }}}
 
 // User Search
-server.search('ou='+config.ldap.users.ou +','+config.ldap.basedn, function(req,res,next) {
-    console.log("basedn= " + req.dn.toString() + ", filter=" + req.filter.toString());
-    if(req.scope == 'sub') {
-        var ou = { dn: 'ou='+config.ldap.users.ou + ',' + config.ldap.basedn,
-                   attributes: { ou: config.ldap.users.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE'] },
-                 };
-        if(req.filter.matches(ou.attributes)) {
-            res.send(ou);
-        }
-    }
-
-    Object.keys(users).forEach(function(k) {
-        if(req.filter.matches(users[k].attributes)) {
-            res.send(users[k]);
-        }
-    });
-
-    res.end();
-    return next();
-});
+server.search('ou='+config.ldap.users.ou +','+config.ldap.basedn, function(req,res,next) { // {{{1
+    userSearch(req,res,next);
+    endRequest(req,res,next);
+}); // }}}
 
 // Root Search
-server.search(config.ldap.basedn, function(req,res,next) {
-    console.log("basedn= " + req.dn.toString() + ", filter=" + req.filter.toString() + ", scope=" + req.scope);
+server.search(config.ldap.basedn,  function(req,res,next) { // {{{1
+    var dn = req.connection.ldap.bindDN.toString();
+    var userObj = users[dn];
+    if(userObj === undefined) {
+        return next(new Ldap.InsufficientAccessRightsError());
+    }
 
-    if(req.scope == 'sub') {
+    if(req.scope === 'base' || req.scope == 'sub') {
         var rootdn = { dn: config.ldap.basedn,
                        attributes: { dc:config.ldap.basedc, objectclass: ['dcObject','organization'], hasSubordinates: ['TRUE']},
         };
@@ -197,35 +282,13 @@ server.search(config.ldap.basedn, function(req,res,next) {
             res.send(rootdn);
         }
     }
+    else { // implies scope == 'one'
 
+    }
     // users
-    var user_ou = { dn: 'ou=' + config.ldap.users.ou + ',' + config.ldap.basedn,
-              attributes: { ou: config.ldap.users.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE'] },
-             };
-    if(req.filter.matches(user_ou.attributes)) {
-        res.send(user_ou);
-    }
-    Object.keys(users).forEach(function(k) {
-        if(req.filter.matches(users[k].attributes)) {
-            res.send(users[k]);
-        }
-    });
+    userSearch(req,res,next);
+    groupSearch(req,res,next);
 
-    // groups
-    var group_ou = { dn: 'ou='+config.ldap.groups.ou + ',' + config.ldap.basedn,
-               attributes: { ou: config.ldap.groups.ou, objectclass: ['top','organizationalunit'], hasSubordinates: ['TRUE'] },
-             };
-    if(req.filter.matches(group_ou.attributes)) {
-        res.send(group_ou);
-    }
-    Object.keys(groups).forEach(function(k) {
-        if(req.filter.matches(groups[k].attributes)) {
-            res.send(groups[k]);
-        }
-    });
-
-    res.end();
-    return next();
-
-});
+    endRequest(req,res,next);
+}); // }}}
 
